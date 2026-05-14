@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>BAR Wind — Sampling & Transit Comparison</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --arrow: #f97583;
+    --trail: #79c0ff;
+    --target: #ffd866;
+    --next: #a5d6ff;
+    --ring: #484f58;
+    --annulus: rgba(88, 166, 255, 0.06);
+    --hist: #56d364;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 18px 22px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px 0; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+  .controls {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: 10px 12px; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; margin-bottom: 14px;
+  }
+  .controls label { color: var(--muted); font-size: 12px; }
+  button {
+    padding: 6px 12px; background: #21262d; color: var(--text);
+    border: 1px solid var(--border); border-radius: 5px;
+    cursor: pointer; font-size: 12px;
+  }
+  button:hover { background: #30363d; border-color: #6e7681; }
+  button.active { background: #1f6feb; border-color: #1f6feb; }
+  input[type="range"] { vertical-align: middle; }
+  .panels {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+  }
+  @media (max-width: 1100px) { .panels { grid-template-columns: repeat(2, 1fr); } }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; padding: 12px;
+  }
+  .panel h3 { margin: 0 0 2px 0; font-size: 13px; font-weight: 600; }
+  .panel .desc { color: var(--muted); font-size: 11px; margin-bottom: 8px; line-height: 1.4; min-height: 32px; }
+  canvas { display: block; background: #010409; border-radius: 4px; border: 1px solid var(--border); }
+  .stats { margin-top: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.5; color: var(--muted); }
+  .stats b { color: var(--text); font-weight: 600; }
+  .hist-label { font-size: 10px; color: var(--muted); margin-top: 8px; margin-bottom: 2px; }
+  .legend { font-size: 10px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; margin-right: 3px; }
+</style>
+</head>
+<body>
+<h1>BAR Wind System — sampling &amp; transit comparison</h1>
+<div class="sub">Same rng cadence and annulus parameters. Only target-selection and transit rules differ between panels.</div>
+
+<div class="controls">
+  <button id="playPause">Pause</button>
+  <button id="reset">Reset</button>
+  <span style="margin-left:14px"></span>
+  <label>Speed:</label>
+  <button class="speed" data-s="1">1×</button>
+  <button class="speed active" data-s="3">3×</button>
+  <button class="speed" data-s="10">10×</button>
+  <button class="speed" data-s="50">50×</button>
+  <span style="margin-left:14px"></span>
+  <label>Trail length:</label>
+  <input type="range" id="trailLen" min="50" max="2000" value="600" step="50">
+  <span id="trailLenVal" style="font-family:monospace;font-size:11px;color:var(--muted);width:40px">600</span>
+  <span style="margin-left:14px"></span>
+  <label>rMin/rMax:</label>
+  <input type="range" id="ratio" min="0.05" max="0.95" value="0.20" step="0.01">
+  <span id="ratioVal" style="font-family:monospace;font-size:11px;color:var(--muted);width:120px">0.20 (rMin=20)</span>
+  <span style="margin-left:14px"></span>
+  <label><input type="checkbox" id="showTargets" checked> show targets</label>
+  <label><input type="checkbox" id="showHist" checked> r-histogram</label>
+  <span style="margin-left:auto;color:var(--muted);font-size:11px">
+    rMax=100, WIND_UPDATE_RATE=30
+  </span>
+</div>
+
+<div class="panels" id="panels"></div>
+
+<div class="legend" style="margin-top:16px">
+  <span><span class="swatch" style="background:var(--annulus); border:1px solid var(--ring)"></span>annulus</span>
+  <span><span class="swatch" style="background:var(--arrow)"></span>current wind vector</span>
+  <span><span class="swatch" style="background:var(--trail)"></span>recent path (transit)</span>
+  <span><span class="swatch" style="background:var(--target)"></span>past targets</span>
+  <span><span class="swatch" style="background:var(--next); border:1px solid var(--next)"></span>next target</span>
+  <span><span class="swatch" style="background:var(--target)"></span>target r (sampler picks)</span>
+  <span><span class="swatch" style="background:var(--hist)"></span>continuous r (every frame)</span>
+</div>
+
+<script>
+// ===== Simulation parameters =====
+let R_MIN  = 20;        // adjustable via ratio slider
+const R_MAX  = 100;
+const WIND_UPDATE_RATE = 30;
+
+// Variant 3 tunables
+const WIND_THETA_DRIFT  = 0.6;
+const WIND_R_DRIFT_FRAC = 0.5;
+const WIND_REJECT_MAX   = 32;
+
+// Canvas
+const CANVAS_SIZE = 280;
+const HIST_H      = 70;
+const PAD         = 14;
+const SCALE       = (CANVAS_SIZE/2 - PAD) / R_MAX;
+const CX = CANVAS_SIZE/2, CY = CANVAS_SIZE/2;
+const HIST_BINS = 50;
+
+// ===== Math helpers =====
+const smoothstep = x => { x = Math.max(0, Math.min(1, x)); return x*x*(3 - 2*x); };
+const mix   = (a, b, t) => a*(1-t) + b*t;
+const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+function wrapAngle(a) {
+  while (a >   Math.PI) a -= 2*Math.PI;
+  while (a <= -Math.PI) a += 2*Math.PI;
+  return a;
+}
+function reflectInto(x, lo, hi) {
+  let guard = 16;
+  while ((x < lo || x > hi) && guard-- > 0) {
+    if (x < lo) x = 2*lo - x;
+    if (x > hi) x = 2*hi - x;
+  }
+  return x;
+}
+
+// ===== Target-selection rules =====
+function selectCartesianClamp(old) {
+  let nx, nz, r;
+  do {
+    nx = old.x - (Math.random() - 0.5) * R_MAX;
+    nz = old.z - (Math.random() - 0.5) * R_MAX;
+    r  = Math.hypot(nx, nz);
+  } while (r === 0);
+  const rc = clamp(r, R_MIN, R_MAX);
+  return { x: nx/r * rc, z: nz/r * rc };
+}
+function selectCartesianReject(old) {
+  let nx, nz, r, attempts = 0;
+  do {
+    nx = old.x - (Math.random() - 0.5) * R_MAX;
+    nz = old.z - (Math.random() - 0.5) * R_MAX;
+    r  = Math.hypot(nx, nz);
+  } while ((r < R_MIN || r > R_MAX) && ++attempts < WIND_REJECT_MAX);
+  if (r < R_MIN || r > R_MAX) return { x: old.x, z: old.z };
+  return { x: nx, z: nz };
+}
+function selectPolarDrift(old) {
+  const curR     = Math.hypot(old.x, old.z);
+  const curTheta = Math.atan2(old.z, old.x);
+  const rRange   = R_MAX - R_MIN;
+  const dr       = (Math.random() - 0.5) * rRange * WIND_R_DRIFT_FRAC;
+  const newR     = reflectInto(curR + dr, R_MIN, R_MAX);
+  const dTheta   = (Math.random() - 0.5) * 2 * WIND_THETA_DRIFT;
+  const newTheta = curTheta + dTheta;
+  return { x: newR * Math.cos(newTheta), z: newR * Math.sin(newTheta) };
+}
+
+// ===== Transit rules =====
+function transitCartesianClamp(old, nw, mod) {
+  let x = mix(old.x, nw.x, mod);
+  let z = mix(old.z, nw.z, mod);
+  const r = Math.hypot(x, z);
+  if (r > 0) {
+    const rc = clamp(r, R_MIN, R_MAX);
+    x = x / r * rc;
+    z = z / r * rc;
+  }
+  return { x, z };
+}
+function transitPolarArc(old, nw, mod) {
+  const rA = Math.hypot(old.x, old.z);
+  const rB = Math.hypot(nw.x, nw.z);
+  const tA = Math.atan2(old.z, old.x);
+  const dT = wrapAngle(Math.atan2(nw.z, nw.x) - tA);
+  const r  = mix(rA, rB, mod);
+  const th = tA + dT * mod;
+  return { x: r * Math.cos(th), z: r * Math.sin(th) };
+}
+
+// ===== Simulation state =====
+class Sim {
+  constructor({ name, desc, select, transit }) {
+    this.name = name; this.desc = desc;
+    this.select = select; this.transit = transit;
+    this.reset();
+  }
+  reset() {
+    const r = mix(R_MIN, R_MAX, Math.random());
+    const t = Math.random() * 2 * Math.PI;
+    this.cur = { x: r*Math.cos(t), z: r*Math.sin(t) };
+    this.old = { ...this.cur };
+    this.new = { ...this.cur };
+    this.timer = 0;
+    this.trail = [];
+    this.targets = [];
+    this.targetHist = new Array(HIST_BINS).fill(0); // r at target picks only
+    this.contHist   = new Array(HIST_BINS).fill(0); // r every frame (incl. transit)
+    this.targetCount = 0;
+    this.frames = 0;
+    this.rSum = 0;
+  }
+  step() {
+    if (this.timer === 0) {
+      this.old = { ...this.cur };
+      this.new = this.select(this.old);
+      this.targets.push({ ...this.new });
+      if (this.targets.length > 60) this.targets.shift();
+
+      // Record target r (sampler's stationary distribution)
+      const rt = Math.hypot(this.new.x, this.new.z);
+      const binT = clamp(Math.floor((rt - R_MIN) / (R_MAX - R_MIN) * HIST_BINS), 0, HIST_BINS - 1);
+      this.targetHist[binT]++;
+      this.targetCount++;
+    } else {
+      const mod = smoothstep(this.timer / WIND_UPDATE_RATE);
+      this.cur = this.transit(this.old, this.new, mod);
+    }
+    this.trail.push({ ...this.cur });
+    if (this.trail.length > maxTrail) this.trail.shift();
+
+    // Record cur r every frame (what the player actually experiences)
+    const rc = Math.hypot(this.cur.x, this.cur.z);
+    const binC = clamp(Math.floor((rc - R_MIN) / (R_MAX - R_MIN) * HIST_BINS), 0, HIST_BINS - 1);
+    this.contHist[binC]++;
+    this.frames++;
+    this.rSum += rc;
+
+    this.timer = (this.timer + 1) % (WIND_UPDATE_RATE + 1);
+  }
+}
+
+const sims = [
+  new Sim({
+    name: 'Current code',
+    desc: 'Cartesian sample + radial clamp, linear Cartesian transit (clamped each frame).',
+    select: selectCartesianClamp,
+    transit: transitCartesianClamp,
+  }),
+  new Sim({
+    name: 'Variant 1',
+    desc: 'Cartesian sample + radial clamp, polar-arc transit.',
+    select: selectCartesianClamp,
+    transit: transitPolarArc,
+  }),
+  new Sim({
+    name: 'Variant 2',
+    desc: 'Cartesian sample + rejection, polar-arc transit.',
+    select: selectCartesianReject,
+    transit: transitPolarArc,
+  }),
+  new Sim({
+    name: 'Variant 3',
+    desc: 'Polar drift + reflection on r, polar-arc transit.',
+    select: selectPolarDrift,
+    transit: transitPolarArc,
+  }),
+];
+
+// ===== DOM =====
+const panelsDiv = document.getElementById('panels');
+sims.forEach((sim, i) => {
+  const p = document.createElement('div');
+  p.className = 'panel';
+  p.innerHTML = `
+    <h3>${sim.name}</h3>
+    <div class="desc">${sim.desc}</div>
+    <canvas id="cv${i}" width="${CANVAS_SIZE}" height="${CANVAS_SIZE}"></canvas>
+    <div class="stats" id="st${i}"></div>
+    <div class="hist-label" id="hlt${i}">Target r — sampler picks (${R_MIN}→${R_MAX})</div>
+    <canvas id="ht${i}" width="${CANVAS_SIZE}" height="${HIST_H}"></canvas>
+    <div class="hist-label" id="hlc${i}">Continuous r — every frame inc. transit (${R_MIN}→${R_MAX})</div>
+    <canvas id="hc${i}" width="${CANVAS_SIZE}" height="${HIST_H}"></canvas>
+  `;
+  panelsDiv.appendChild(p);
+});
+
+function w2c(x, z) { return { x: CX + x * SCALE, y: CY + z * SCALE }; }
+function drawArrow(ctx, x1, y1, x2, y2, color, width = 2.5) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.hypot(dx, dy);
+  ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = width;
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  if (len < 1) return;
+  const ux = dx / len, uy = dy / len;
+  const head = 9, base = 4.5;
+  const ax = x2 - ux * head, ay = y2 - uy * head;
+  const px = -uy, py = ux;
+  ctx.beginPath();
+  ctx.moveTo(x2, y2);
+  ctx.lineTo(ax + px * base, ay + py * base);
+  ctx.lineTo(ax - px * base, ay - py * base);
+  ctx.closePath(); ctx.fill();
+}
+
+function renderField(sim, i) {
+  const cv = document.getElementById('cv' + i);
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+  // Annulus fill + ring outlines
+  ctx.save();
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--annulus').trim();
+  ctx.beginPath();
+  ctx.arc(CX, CY, R_MAX * SCALE, 0, 2*Math.PI);
+  ctx.arc(CX, CY, R_MIN * SCALE, 0, 2*Math.PI, true);
+  ctx.fill('evenodd');
+  ctx.restore();
+
+  ctx.strokeStyle = '#484f58'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(CX, CY, R_MAX * SCALE, 0, 2*Math.PI); ctx.stroke();
+  ctx.beginPath(); ctx.arc(CX, CY, R_MIN * SCALE, 0, 2*Math.PI); ctx.stroke();
+
+  // Crosshair at origin
+  ctx.strokeStyle = '#21262d';
+  ctx.beginPath(); ctx.moveTo(PAD, CY); ctx.lineTo(CANVAS_SIZE-PAD, CY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX, PAD); ctx.lineTo(CX, CANVAS_SIZE-PAD); ctx.stroke();
+
+  // Trail (fading polyline)
+  if (sim.trail.length > 1) {
+    const n = sim.trail.length;
+    for (let k = 1; k < n; k++) {
+      const a = sim.trail[k-1], b = sim.trail[k];
+      const aP = w2c(a.x, a.z), bP = w2c(b.x, b.z);
+      const alpha = 0.05 + 0.85 * (k / n);
+      ctx.strokeStyle = `rgba(121, 192, 255, ${alpha})`;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.moveTo(aP.x, aP.y); ctx.lineTo(bP.x, bP.y); ctx.stroke();
+    }
+  }
+
+  // Past targets
+  if (showTargets) {
+    sim.targets.forEach((p, idx) => {
+      const sp = w2c(p.x, p.z);
+      const alpha = 0.15 + 0.55 * (idx / sim.targets.length);
+      ctx.fillStyle = `rgba(255, 216, 102, ${alpha})`;
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, 2.4, 0, 2*Math.PI); ctx.fill();
+    });
+    // Next target (current "new")
+    const np = w2c(sim.new.x, sim.new.z);
+    ctx.strokeStyle = '#a5d6ff'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(np.x, np.y, 5, 0, 2*Math.PI); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(np.x - 3, np.y); ctx.lineTo(np.x + 3, np.y);
+    ctx.moveTo(np.x, np.y - 3); ctx.lineTo(np.x, np.y + 3); ctx.stroke();
+  }
+
+  // Current wind arrow
+  const cp = w2c(sim.cur.x, sim.cur.z);
+  drawArrow(ctx, CX, CY, cp.x, cp.y, '#f97583', 2.5);
+
+  // Stats line
+  const r = Math.hypot(sim.cur.x, sim.cur.z);
+  const theta = Math.atan2(sim.cur.z, sim.cur.x) * 180 / Math.PI;
+  const meanR = sim.frames > 0 ? sim.rSum / sim.frames : 0;
+  document.getElementById('st' + i).innerHTML =
+    `<b>r</b>=${r.toFixed(1).padStart(5)}  <b>θ</b>=${theta.toFixed(0).padStart(4)}°<br>` +
+    `mean&nbsp;r=<b>${meanR.toFixed(2)}</b>  frames=${sim.frames}`;
+}
+
+function renderHistOn(canvas, histArr, totalCount, color, labelN) {
+  const hc = canvas.getContext('2d');
+  hc.clearRect(0, 0, CANVAS_SIZE, HIST_H);
+  if (!showHist) return;
+
+  const total = totalCount || 1;
+  const binWidth = (R_MAX - R_MIN) / HIST_BINS;
+  const densities = histArr.map(c => (c / total) / binWidth);
+  // Floor the y-scale at 2× uniform density so the uniform reference line
+  // is always clearly visible even when the annulus is narrow.
+  const uniform = 1 / (R_MAX - R_MIN);
+  const yMax = Math.max(2 * uniform, ...densities) * 1.05;
+
+  const bw = CANVAS_SIZE / HIST_BINS;
+  hc.fillStyle = color;
+  densities.forEach((d, idx) => {
+    const h = (d / yMax) * (HIST_H - 14);
+    hc.fillRect(idx * bw, HIST_H - h, Math.max(1, bw - 0.5), h);
+  });
+
+  // Reference: uniform density line
+  const uniY = HIST_H - (uniform / yMax) * (HIST_H - 14);
+  hc.strokeStyle = 'rgba(255,255,255,0.35)';
+  hc.setLineDash([3, 3]);
+  hc.beginPath(); hc.moveTo(0, uniY); hc.lineTo(CANVAS_SIZE, uniY); hc.stroke();
+  hc.setLineDash([]);
+  hc.fillStyle = '#8b949e'; hc.font = '9px ui-monospace, monospace';
+  hc.fillText('uniform', 4, uniY - 2);
+  hc.fillStyle = '#6e7681';
+  hc.fillText(`N=${totalCount}`, CANVAS_SIZE - 70, 10);
+}
+
+// ===== Animation =====
+let running = true;
+let speed = 3;
+let maxTrail = 600;
+let showTargets = true;
+let showHist = true;
+
+function renderAllHists(sim, i) {
+  renderHistOn(document.getElementById('ht' + i), sim.targetHist, sim.targetCount, '#ffd866', sim.targetCount);
+  renderHistOn(document.getElementById('hc' + i), sim.contHist,   sim.frames,      '#56d364', sim.frames);
+}
+
+function frame() {
+  if (running) {
+    for (let s = 0; s < speed; s++) sims.forEach(sim => sim.step());
+    sims.forEach((sim, i) => { renderField(sim, i); renderAllHists(sim, i); });
+  }
+  requestAnimationFrame(frame);
+}
+
+// Initial render
+sims.forEach((sim, i) => { renderField(sim, i); renderAllHists(sim, i); });
+frame();
+
+// ===== Controls =====
+document.getElementById('playPause').onclick = (e) => {
+  running = !running; e.target.textContent = running ? 'Pause' : 'Play';
+};
+document.getElementById('reset').onclick = () => {
+  sims.forEach(s => s.reset());
+  sims.forEach((sim, i) => { renderField(sim, i); renderAllHists(sim, i); });
+};
+document.querySelectorAll('button.speed').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('button.speed').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    speed = parseInt(b.dataset.s, 10);
+  };
+});
+const trailLen = document.getElementById('trailLen');
+const trailLenVal = document.getElementById('trailLenVal');
+trailLen.oninput = () => { maxTrail = parseInt(trailLen.value, 10); trailLenVal.textContent = maxTrail; };
+document.getElementById('showTargets').onchange = (e) => { showTargets = e.target.checked; };
+document.getElementById('showHist').onchange    = (e) => { showHist    = e.target.checked; };
+
+const ratio = document.getElementById('ratio');
+const ratioVal = document.getElementById('ratioVal');
+ratio.oninput = () => {
+  const r = parseFloat(ratio.value);
+  R_MIN = Math.round(R_MAX * r);
+  ratioVal.textContent = `${r.toFixed(2)} (rMin=${R_MIN})`;
+  // Update each histogram label to reflect the new range
+  sims.forEach((_, i) => {
+    const lt = document.getElementById('hlt' + i);
+    const lc = document.getElementById('hlc' + i);
+    if (lt) lt.textContent = `Target r — sampler picks (${R_MIN}→${R_MAX})`;
+    if (lc) lc.textContent = `Continuous r — every frame inc. transit (${R_MIN}→${R_MAX})`;
+  });
+  // Reset sims because old bin counts and trail points reference the old annulus
+  sims.forEach(s => s.reset());
+  sims.forEach((sim, i) => { renderField(sim, i); renderAllHists(sim, i); });
+};
+</script>
+</body>
+</html>
